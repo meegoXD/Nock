@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- All displays: tray → *Show on display* → *All displays (mirror)* (`all_displays=1` in `config.ini`) shows a copy of the notch at the top of every other display. The copies reuse the frame the notch already draws (nothing is drawn twice) and install no mouse hook. Rest the pointer on a copy for a moment, or click it, and the real notch (with the top bar) moves to that display while the old one gets a copy. A copy hides while a full-screen app covers its own display, and with the notch tucked away.
+- All displays: tray → *Show on display* → *All displays (mirror)* (`all_displays=1` in `config.ini`) shows a copy of the notch, and of the top bar (sized to each display, so portrait monitors work too), at the top of every other display. The copies reuse the frame the notch already draws (nothing is drawn twice) and install no mouse hook. Rest the pointer on a copy for a moment, or click it, and the real notch (with the top bar) moves to that display while the old one gets a copy. A copy hides while a full-screen app covers its own display, and with the notch tucked away.
 
 ## 0.11.0
 
