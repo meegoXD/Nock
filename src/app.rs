@@ -190,6 +190,10 @@ pub struct App {
     fs_peekable: bool,
     pub bar: Option<crate::bar::Bar>,
     pub pop: Option<crate::pop::Pop>,
+    /// Copias del notch en las demás pantallas (mirror.rs).
+    pub mirrors: Vec<crate::mirror::Mirror>,
+    /// Copia bajo el puntero que espera el tiempo de permanencia para mover el notch.
+    pub mirror_pending: Option<HWND>,
     pub page: Page,
     pub eq_phase: f32,
     last_tick: Instant,
@@ -356,6 +360,8 @@ impl App {
             fs_peekable: false,
             bar: None,
             pop: None,
+            mirrors: Vec::new(),
+            mirror_pending: None,
             page: Page::Media,
             eq_phase: 0.0,
             last_tick: Instant::now(),
@@ -671,7 +677,10 @@ impl App {
     // -------------------------------------------------------------- render --
 
     pub fn render(&mut self) {
-        if self.hidden {
+        // Si el notch real está oculto (pantalla completa en SU pantalla) pero hay
+        // copias visibles en otras, igual hay que dibujar el cuadro para ellas.
+        let mirrors_on = self.mirrors.iter().any(|m| m.shown);
+        if self.hidden && !mirrors_on {
             return;
         }
         let w = self.sw.x.clamp(60.0, EXP_W + MARGIN);
@@ -689,7 +698,10 @@ impl App {
         let mon_w = self.mon.right - self.mon.left;
         let x = self.mon.left + (mon_w - pw) / 2;
         let y = self.mon.top;
-        let _ = self.gfx.present(self.hwnd, x, y, pw, ph);
+        if !self.hidden {
+            let _ = self.gfx.present(self.hwnd, x, y, pw, ph);
+        }
+        self.present_mirrors(pw, ph);
     }
 
     // ----------------------------------------------------------- animation --
@@ -757,6 +769,7 @@ impl App {
                 self.kill_timer(T_FSCHK);
                 self.on_foreground();
             }
+            crate::mirror::T_MIRROR => self.on_mirror_timer(),
             crate::pop::T_POPLEAVE => self.on_pop_leave_timer(),
             crate::pop::T_LINK => self.on_link_tick(),
             crate::buddy::T_BUDDY => self.on_buddy_tick(),
@@ -776,7 +789,7 @@ impl App {
             T_MIN => {
                 self.arm_minute_timer();
                 self.smart_tick();
-                if self.bar_visible() {
+                if self.bar_visible() || self.mirror_bars_visible() {
                     self.refresh_bar_data();
                     self.render_bar();
                 }
@@ -894,6 +907,7 @@ impl App {
         self.cfg.top_bar = !self.cfg.top_bar;
         store::save_config(&self.cfg);
         self.sync_bar();
+        self.sync_mirror_bars();
         self.update_reserve();
         if !self.expanded {
             let (w, h) = self.target_size();
@@ -2036,10 +2050,12 @@ impl App {
             self.raise_windows();
             self.on_bar_foreground();
         }
+        self.sync_mirror_visibility();
     }
 
     pub fn on_display_change(&mut self, new_scale: f32) {
         self.update_monitor();
+        self.sync_mirrors();
         if (new_scale - self.scale).abs() > 0.01 {
             self.rebuild_gfx(new_scale);
         }

@@ -1265,6 +1265,36 @@ pub(crate) fn is_shell_overlay(class: &str) -> bool {
     )
 }
 
+/// ¿La ventana en primer plano ocupa por completo la pantalla `mon`?
+/// Igual que `fullscreen_kind`, pero sin escribir en el log: se consulta una vez
+/// por cada copia del notch (ver mirror.rs) en cada cambio de ventana activa.
+pub fn fullscreen_on(skip: &[HWND], mon: &RECT) -> bool {
+    unsafe {
+        let fg = GetForegroundWindow();
+        if fg.is_invalid() || skip.contains(&fg) {
+            return false;
+        }
+        let cls = class_of(fg);
+        if matches!(cls.as_str(), "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd") || is_shell_overlay(&cls) {
+            return false;
+        }
+        let mut r = RECT::default();
+        if GetWindowRect(fg, &mut r).is_err() {
+            return false;
+        }
+        let style = GetWindowLongPtrW(fg, GWL_STYLE) as u32;
+        is_fullscreen_window(&r, mon, style)
+    }
+}
+
+/// Rectángulo completo de una pantalla, en píxeles de escritorio.
+pub fn monitor_rect(m: HMONITOR) -> Option<RECT> {
+    unsafe {
+        let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+        GetMonitorInfoW(m, &mut mi).as_bool().then_some(mi.rcMonitor)
+    }
+}
+
 static LAST_KIND: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
 pub fn log_visibility(msg: &str) {
