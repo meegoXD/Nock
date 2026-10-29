@@ -153,6 +153,9 @@ impl App {
                     let _ = SetWindowPos(p.hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, flags);
                 }
             }
+            for m in self.mirrors.iter().filter(|m| m.shown) {
+                let _ = SetWindowPos(m.hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, flags);
+            }
             let _ = SetWindowPos(self.hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, flags);
         }
     }

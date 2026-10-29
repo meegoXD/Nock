@@ -1,0 +1,194 @@
+//! Copias del notch en las demás pantallas ("All displays (mirror)" en la bandeja).
+//!
+//! Cada copia es una ventana en capas que recibe el MISMO bitmap que el notch
+//! principal en cada `render()`: no se dibuja dos veces, solo se presenta en más
+//! sitios. Las copias no instalan ganchos de mouse: usan los mensajes normales de
+//! su ventana. Al dejar el puntero sobre una copia (o hacer clic), el notch real se
+//! muda a esa pantalla y la copia pasa a la pantalla anterior, así se puede usar
+//! desde cualquier monitor.
+
+use windows::core::*;
+use windows::Win32::Foundation::*;
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::WindowsAndMessaging::*;
+
+use crate::app::App;
+use crate::sys;
+
+/// Tiempo que el puntero debe quedarse sobre una copia antes de mover el notch.
+pub const T_MIRROR: usize = 22;
+const DWELL_MS: u32 = 200;
+
+pub struct Mirror {
+    pub hwnd: HWND,
+    /// Rectángulo de la pantalla donde vive esta copia.
+    pub mon: RECT,
+    /// Índice de esa pantalla para `sys::pick_monitor` (1 = primera de `sys::monitors()`).
+    pub idx: u8,
+    pub shown: bool,
+}
+
+fn same_rect(a: &RECT, b: &RECT) -> bool {
+    a.left == b.left && a.top == b.top && a.right == b.right && a.bottom == b.bottom
+}
+
+/// Ventana vacía con la misma clase que el resto (los mensajes se enrutan por handle).
+fn create_window() -> Option<HWND> {
+    unsafe {
+        let hinst: HINSTANCE = GetModuleHandleW(None).ok()?.into();
+        CreateWindowExW(
+            WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+            w!("NockWindow"),
+            w!(""), // sin título: los selectores de ventanas (OBS, grabadores) la ignoran
+            WS_POPUP,
+            0,
+            0,
+            10,
+            10,
+            None,
+            None,
+            Some(hinst),
+            None,
+        )
+        .ok()
+    }
+}
+
+impl App {
+    pub fn is_mirror(&self, h: HWND) -> bool {
+        self.mirrors.iter().any(|m| m.hwnd == h)
+    }
+
+    /// Deja una copia en cada pantalla excepto la del notch real (o ninguna si la
+    /// opción está apagada). Se llama al arrancar, al cambiar de pantalla y al
+    /// conectar o desconectar monitores.
+    pub fn sync_mirrors(&mut self) {
+        let mut want: Vec<(u8, RECT)> = Vec::new();
+        if self.cfg.mirror {
+            for (i, m) in sys::monitors().iter().enumerate() {
+                if let Some(r) = sys::monitor_rect(*m) {
+                    if !same_rect(&r, &self.mon) {
+                        want.push(((i + 1).min(16) as u8, r));
+                    }
+                }
+            }
+        }
+        while self.mirrors.len() > want.len() {
+            if let Some(m) = self.mirrors.pop() {
+                unsafe {
+                    let _ = DestroyWindow(m.hwnd);
+                }
+            }
+        }
+        while self.mirrors.len() < want.len() {
+            match create_window() {
+                Some(hwnd) => self.mirrors.push(Mirror { hwnd, mon: RECT::default(), idx: 0, shown: false }),
+                None => break,
+            }
+        }
+        for (m, (idx, r)) in self.mirrors.iter_mut().zip(want) {
+            m.idx = idx;
+            m.mon = r;
+        }
+        self.mirror_pending = None;
+        self.sync_mirror_visibility();
+    }
+
+    /// Muestra u oculta cada copia: se ocultan con el notch "guardado" (Ctrl+Alt+H)
+    /// y cuando una app a pantalla completa ocupa SU pantalla (para no quedar encima
+    /// de un juego o un video en modo ventana sin bordes).
+    pub fn sync_mirror_visibility(&mut self) {
+        if self.mirrors.is_empty() {
+            return;
+        }
+        let mut skip = vec![self.hwnd];
+        if let Some(b) = &self.bar {
+            skip.push(b.hwnd);
+        }
+        if let Some(p) = &self.pop {
+            skip.push(p.hwnd);
+        }
+        skip.extend(self.mirrors.iter().map(|m| m.hwnd));
+
+        let tucked = self.tucked;
+        let fs_hide = self.cfg.fs_hide;
+        let mut appeared = false;
+        for m in self.mirrors.iter_mut() {
+            let show = !tucked && !(fs_hide && sys::fullscreen_on(&skip, &m.mon));
+            if show != m.shown {
+                m.shown = show;
+                appeared |= show;
+                unsafe {
+                    let _ = ShowWindow(m.hwnd, if show { SW_SHOWNOACTIVATE } else { SW_HIDE });
+                }
+            }
+        }
+        if appeared {
+            self.render(); // la copia recién mostrada necesita su primer cuadro
+        }
+    }
+
+    /// Envía el cuadro ya dibujado a cada copia visible, centrado arriba de su pantalla.
+    pub fn present_mirrors(&self, pw: i32, ph: i32) {
+        for m in self.mirrors.iter().filter(|m| m.shown) {
+            let w = m.mon.right - m.mon.left;
+            let _ = self.gfx.present(m.hwnd, m.mon.left + (w - pw) / 2, m.mon.top, pw, ph);
+        }
+    }
+
+    /// Mensajes de una copia. Solo interesa el puntero: todo lo demás es por defecto.
+    pub fn mirror_msg(&mut self, hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+        match msg {
+            WM_MOUSEMOVE => {
+                if self.mirror_pending != Some(hwnd) {
+                    self.mirror_pending = Some(hwnd);
+                    self.set_timer(T_MIRROR, DWELL_MS);
+                }
+                LRESULT(0)
+            }
+            WM_LBUTTONDOWN => {
+                self.jump_to_mirror(hwnd);
+                LRESULT(0)
+            }
+            WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
+            _ => unsafe { DefWindowProcW(hwnd, msg, wp, lp) },
+        }
+    }
+
+    /// Pasó el tiempo de espera: si el puntero sigue sobre la copia, mover el notch ahí.
+    pub fn on_mirror_timer(&mut self) {
+        self.kill_timer(T_MIRROR);
+        let Some(h) = self.mirror_pending.take() else { return };
+        let still_inside = unsafe {
+            let mut p = POINT::default();
+            let mut r = RECT::default();
+            GetCursorPos(&mut p).is_ok()
+                && GetWindowRect(h, &mut r).is_ok()
+                && p.x >= r.left
+                && p.x < r.right
+                && p.y >= r.top
+                && p.y < r.bottom
+        };
+        if still_inside {
+            self.jump_to_mirror(h);
+        }
+    }
+
+    /// Muda el notch real (y la barra) a la pantalla de esa copia.
+    fn jump_to_mirror(&mut self, h: HWND) {
+        self.kill_timer(T_MIRROR);
+        self.mirror_pending = None;
+        let Some(idx) = self.mirrors.iter().find(|m| m.hwnd == h).map(|m| m.idx) else { return };
+        sys::log_visibility(&format!("mirror: moving the notch to display {idx}"));
+        self.set_monitor(idx); // guarda la pantalla, recoloca todo y rehace las copias
+        self.on_foreground(); // re-evalúa pantalla completa en la pantalla nueva
+    }
+
+    /// Bandeja: encender o apagar las copias en todas las pantallas.
+    pub fn toggle_mirror(&mut self) {
+        self.cfg.mirror = !self.cfg.mirror;
+        crate::store::save_config(&self.cfg);
+        self.sync_mirrors();
+        self.render();
+    }
+}

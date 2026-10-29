@@ -13,6 +13,7 @@ mod scene;
 mod gfx;
 mod pop;
 mod media;
+mod mirror;
 mod radio;
 mod store;
 mod sys;
@@ -210,6 +211,7 @@ fn main() -> Result<()> {
             a.sync_bar();
             a.load_brightness_once();
             a.on_media(); // pick up anything the media thread already found
+            a.sync_mirrors(); // copias en las demás pantallas, si la opción está activa
             a.render();
             if !a.hidden {
                 let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
@@ -293,6 +295,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
     }
     if a.is_pop(hwnd) {
         return a.pop_msg(hwnd, msg, wp, lp);
+    }
+    if a.is_mirror(hwnd) {
+        return a.mirror_msg(hwnd, msg, wp, lp);
     }
     if a.is_buddy(hwnd) || a.is_stage(hwnd) {
         return DefWindowProcW(hwnd, msg, wp, lp);
@@ -503,6 +508,9 @@ fn on_tray(hwnd: HWND, a: &mut App, lp: LPARAM) {
                     let m = if cur == i { MF_CHECKED } else { MF_UNCHECKED };
                     let _ = AppendMenuW(sub, MF_STRING | m, 100 + i, &HSTRING::from(format!("Display {i}")));
                 }
+                let _ = AppendMenuW(sub, MF_SEPARATOR, 0, PCWSTR::null());
+                let mm = if a.cfg.mirror { MF_CHECKED } else { MF_UNCHECKED };
+                let _ = AppendMenuW(sub, MF_STRING | mm, 99, w!("All displays (mirror)"));
                 let _ = AppendMenuW(menu, MF_POPUP, sub.0 as usize, w!("Show on display"));
             }
         }
@@ -561,6 +569,7 @@ fn on_tray(hwnd: HWND, a: &mut App, lp: LPARAM) {
             80..=83 => a.set_eye_min([0u16, 20, 30, 45][(cmd.0 - 80) as usize]),
             70..=74 => a.set_water_min([0u16, 30, 45, 60, 90][(cmd.0 - 70) as usize]),
             100..=116 => a.set_monitor((cmd.0 - 100) as u8),
+            99 => a.toggle_mirror(),
             31..=46 => a.play_scene((cmd.0 - 31) as usize),
             9 => {
                 // Clean up, then end the process outright so no helper thread,
