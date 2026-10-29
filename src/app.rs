@@ -789,7 +789,7 @@ impl App {
             T_MIN => {
                 self.arm_minute_timer();
                 self.smart_tick();
-                if self.bar_visible() {
+                if self.bar_visible() || self.mirror_bars_visible() {
                     self.refresh_bar_data();
                     self.render_bar();
                 }
@@ -907,6 +907,7 @@ impl App {
         self.cfg.top_bar = !self.cfg.top_bar;
         store::save_config(&self.cfg);
         self.sync_bar();
+        self.sync_mirror_bars();
         self.update_reserve();
         if !self.expanded {
             let (w, h) = self.target_size();

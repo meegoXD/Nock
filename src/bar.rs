@@ -154,6 +154,9 @@ impl App {
                 }
             }
             for m in self.mirrors.iter().filter(|m| m.shown) {
+                if m.bar_shown {
+                    let _ = SetWindowPos(m.bar_hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, flags);
+                }
                 let _ = SetWindowPos(m.hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, flags);
             }
             let _ = SetWindowPos(self.hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, flags);
@@ -213,184 +216,42 @@ impl App {
     }
 
     pub fn render_bar(&mut self) {
-        if !self.bar_visible() {
+        // La barra principal y las barras de las copias en otras pantallas (mirror.rs)
+        // se dibujan con la misma función, cada una con el ancho de su pantalla.
+        let main_vis = self.bar_visible();
+        if !main_vis && !self.mirror_bars_visible() {
             return;
         }
-        let scale = self.scale;
-        let mon_w = self.mon.right - self.mon.left;
-        let (pw, ph) = (mon_w, (BAR_H * scale).round() as i32);
-        let w = pw as f32 / scale;
-        let (wifi, bt) = (self.radios.wifi, self.radios.bluetooth);
-        let (vol, muted, has_vol) = (self.volume, self.muted, self.has_volume);
-        let clock24 = self.cfg.clock_24h;
-        let clock_style = self.cfg.clock_style;
-        let stats = self.stats;
-        let accent = self.accent;
+        let fr = BarFrame {
+            scale: self.scale,
+            wifi: self.radios.wifi,
+            bt: self.radios.bluetooth,
+            vol: self.volume,
+            muted: self.muted,
+            has_vol: self.has_volume,
+            clock24: self.cfg.clock_24h,
+            clock_style: self.cfg.clock_style,
+            stats: self.stats,
+            accent: self.accent,
+            // connecting: the icon breathes while a Wi-Fi / Bluetooth attempt is running
+            wifi_busy: sys::WIFI.lock().map(|w| w.busy.is_some()).unwrap_or(false),
+            bt_busy: self.bt_busy.is_some(),
+            pulse: 0.62 + 0.38 * (self.link_phase as f32 * 0.42).sin(),
+        };
         let active = self.pop_kind();
-        // connecting: the icon breathes while a Wi-Fi / Bluetooth attempt is running
-        let wifi_busy = sys::WIFI.lock().map(|w| w.busy.is_some()).unwrap_or(false);
-        let bt_busy = self.bt_busy.is_some();
-        let pulse = 0.62 + 0.38 * (self.link_phase as f32 * 0.42).sin();
-        let Some(bar) = self.bar.as_mut() else { return };
-        let g = &bar.gfx;
-        let f = &g.fonts;
-        let is_hot = |a: BarAct| bar.hot == Some(a) || active == Some(a);
-        if g.begin(pw, ph).is_err() {
-            return;
+        let Some(main) = self.bar.as_mut() else { return };
+        let (app_name, battery, light) = (main.app_name.clone(), main.battery, main.light);
+        if main_vis {
+            paint_bar(main, &self.mon, &fr, active);
         }
-        let mut hits: Vec<(Rect, BarAct)> = Vec::new();
-        let th = theme(bar.light);
-        g.fill_rrect(Rect::new(0.0, 0.0, w, BAR_H), 0.0, th.bg);
-        g.fill_rrect(Rect::new(0.0, BAR_H - 1.0, w, 1.0), 0.0, th.line);
-
-        // left: app name (kept clear of the notch in the middle)
-        let name_w = (w / 2.0 - 170.0).max(40.0);
-        g.text(
-            &bar.app_name,
-            Rect::new(14.0, 0.0, name_w, BAR_H),
-            &f.menu,
-            th.t1,
-            Align::Left,
-        );
-
-        // right: laid out right-to-left
-        let (_, mo, day, wd, hh, mm, _, _) = sys::local_time();
-        let time = if clock24 {
-            format!("{:02}:{:02}", hh, mm)
-        } else {
-            let h12 = match hh % 12 {
-                0 => 12,
-                n => n,
-            };
-            format!("{}:{:02} {}", h12, mm, if hh < 12 { "AM" } else { "PM" })
-        };
-        let clock = format!(
-            "{} {} {}  {}",
-            DAYS[(wd % 7) as usize],
-            day,
-            MONTHS[((mo.max(1) - 1) % 12) as usize],
-            time
-        );
-        let mut x = w - 10.0;
-        let item_y = 4.0;
-        let item_h = BAR_H - 8.0;
-        let mut item = |width: f32| {
-            x -= width;
-            Rect::new(x, item_y, width, item_h)
-        };
-
-        let r = item(if clock24 { 128.0 } else { 148.0 });
-        draw_hover(g, th.hover, r, is_hot(BarAct::Clock));
-        match clock_style {
-            1 | 2 => {
-                // date on the left, an analog or binary clock on the right
-                let date = format!("{} {} {}", DAYS[(wd % 7) as usize], day, MONTHS[((mo.max(1) - 1) % 12) as usize]);
-                g.text(&date, Rect::new(r.x, r.y, r.w - 34.0, r.h), &f.small, th.t1, Align::Right);
-                let (cx, cy) = (r.x + r.w - 15.0, r.y + r.h / 2.0);
-                if clock_style == 1 {
-                    g.fill_circle(cx, cy, 10.0, th.t1.fade(0.14));
-                    g.fill_circle(cx, cy, 9.0, th.bg);
-                    let a_h = ((hh % 12) as f32 + mm as f32 / 60.0) * std::f32::consts::TAU / 12.0;
-                    let a_m = mm as f32 * std::f32::consts::TAU / 60.0;
-                    g.line((cx, cy), (cx + a_h.sin() * 5.0, cy - a_h.cos() * 5.0), 1.8, th.t1);
-                    g.line((cx, cy), (cx + a_m.sin() * 7.5, cy - a_m.cos() * 7.5), 1.2, accent);
-                    g.fill_circle(cx, cy, 1.2, th.t1);
-                } else {
-                    // binary-coded decimal: columns are tens/ones of hours and minutes
-                    let digits = [hh / 10, hh % 10, mm / 10, mm % 10];
-                    for (c, d) in digits.iter().enumerate() {
-                        for bit in 0..4u32 {
-                            let on = (d >> (3 - bit)) & 1 == 1;
-                            let col = if on { accent } else { th.t1.fade(0.16) };
-                            g.fill_circle(cx - 9.0 + c as f32 * 6.0, cy - 7.5 + bit as f32 * 5.0, 1.9, col);
-                        }
-                    }
-                }
+        for m in self.mirrors.iter_mut().filter(|m| m.shown) {
+            if let Some(mb) = m.bar.as_mut() {
+                mb.app_name.clone_from(&app_name);
+                mb.battery = battery;
+                mb.light = light;
+                paint_bar(mb, &m.mon, &fr, None);
             }
-            3 => {
-                // hours until Friday 00:00
-                let days = (5 + 7 - wd % 7) % 7;
-                let text = if wd % 7 == 5 {
-                    "It's Friday!".to_string()
-                } else {
-                    let left = days * 1440 - (hh * 60 + mm);
-                    format!("{}d {}h to Friday", left / 1440, (left % 1440) / 60)
-                };
-                g.text(&text, r, &f.small, th.t1, Align::Center);
-            }
-            _ => g.text(&clock, r, &f.small, th.t1, Align::Center),
         }
-        hits.push((r, BarAct::Clock));
-
-        if let Some((pct, charging)) = bar.battery {
-            let r = item(66.0);
-            draw_hover(g, th.hover, r, is_hot(BarAct::Battery));
-            let col = if charging {
-                Color(0.45, 0.85, 0.5, 1.0)
-            } else if pct <= 20 {
-                Color(1.0, 0.45, 0.4, 1.0)
-            } else {
-                th.t1
-            };
-            g.icon('\u{E83F}', Rect::new(r.x + 4.0, r.y, 20.0, r.h), &f.icon14, col);
-            g.text(
-                &format!("{}%", pct),
-                Rect::new(r.x + 24.0, r.y, 40.0, r.h),
-                &f.small,
-                th.t1,
-                Align::Left,
-            );
-            hits.push((r, BarAct::Battery));
-        }
-
-        if has_vol {
-            let r = item(30.0);
-            draw_hover(g, th.hover, r, is_hot(BarAct::Volume));
-            let glyph = if muted || vol <= 0.001 { '\u{E74F}' } else { '\u{E767}' };
-            g.icon(glyph, r, &f.icon14, th.t1);
-            hits.push((r, BarAct::Volume));
-        }
-
-        {
-            // always shown: the slider works even if Windows would not tell us the
-            // current level (we can still set it)
-            let r = item(30.0);
-            draw_hover(g, th.hover, r, is_hot(BarAct::Brightness));
-            g.icon('\u{E706}', r, &f.icon14, th.t1);
-            hits.push((r, BarAct::Brightness));
-        }
-
-        for (state, glyph, act) in [
-            (bt, '\u{E702}', BarAct::Bluetooth),
-            (wifi, '\u{E701}', BarAct::Wifi),
-        ] {
-            if state.is_none() {
-                continue;
-            }
-            let r = item(30.0);
-            draw_hover(g, th.hover, r, is_hot(act));
-            let mut col = if state == Some(true) { accent } else { th.t2 };
-            let busy = match act {
-                BarAct::Wifi => wifi_busy,
-                _ => bt_busy,
-            };
-            if busy {
-                col = Color(accent.0, accent.1, accent.2, pulse);
-            }
-            g.icon(glyph, r, &f.icon14, col);
-            hits.push((r, act));
-        }
-
-        if let Some((cpu, mem)) = stats {
-            // read-out only: not clickable, so it is not in `hits`
-            let r = item(118.0);
-            g.text(&format!("CPU {cpu}%  RAM {mem}%"), r, &f.small, th.t2, Align::Center);
-        }
-        bar.left_x = x;
-
-        let _ = g.end();
-        bar.hits = hits;
-        let _ = g.present(bar.hwnd, self.mon.left, self.mon.top, pw, ph);
     }
 
     // ------------------------------------------------------------- input --
@@ -475,6 +336,194 @@ impl App {
     fn bar_click(&mut self, act: BarAct, anchor: i32) {
         self.open_pop(act, anchor);
     }
+}
+
+/// Datos que comparten todas las barras en un mismo cuadro.
+struct BarFrame {
+    scale: f32,
+    wifi: Option<bool>,
+    bt: Option<bool>,
+    vol: f32,
+    muted: bool,
+    has_vol: bool,
+    clock24: bool,
+    clock_style: u8,
+    stats: Option<(u32, u32)>,
+    accent: Color,
+    wifi_busy: bool,
+    bt_busy: bool,
+    pulse: f32,
+}
+
+/// Dibuja una barra a lo ancho de la pantalla `mon` y la presenta en su ventana.
+fn paint_bar(bar: &mut Bar, mon: &RECT, fr: &BarFrame, active: Option<BarAct>) {
+    let scale = fr.scale;
+    let mon_w = mon.right - mon.left;
+    let (pw, ph) = (mon_w, (BAR_H * scale).round() as i32);
+    let w = pw as f32 / scale;
+    let (wifi, bt) = (fr.wifi, fr.bt);
+    let (vol, muted, has_vol) = (fr.vol, fr.muted, fr.has_vol);
+    let (clock24, clock_style, stats, accent) = (fr.clock24, fr.clock_style, fr.stats, fr.accent);
+    let (wifi_busy, bt_busy, pulse) = (fr.wifi_busy, fr.bt_busy, fr.pulse);
+    let g = &bar.gfx;
+    let f = &g.fonts;
+    let is_hot = |a: BarAct| bar.hot == Some(a) || active == Some(a);
+    if g.begin(pw, ph).is_err() {
+        return;
+    }
+    let mut hits: Vec<(Rect, BarAct)> = Vec::new();
+    let th = theme(bar.light);
+    g.fill_rrect(Rect::new(0.0, 0.0, w, BAR_H), 0.0, th.bg);
+    g.fill_rrect(Rect::new(0.0, BAR_H - 1.0, w, 1.0), 0.0, th.line);
+
+    // left: app name (kept clear of the notch in the middle)
+    let name_w = (w / 2.0 - 170.0).max(40.0);
+    g.text(
+        &bar.app_name,
+        Rect::new(14.0, 0.0, name_w, BAR_H),
+        &f.menu,
+        th.t1,
+        Align::Left,
+    );
+
+    // right: laid out right-to-left
+    let (_, mo, day, wd, hh, mm, _, _) = sys::local_time();
+    let time = if clock24 {
+        format!("{:02}:{:02}", hh, mm)
+    } else {
+        let h12 = match hh % 12 {
+            0 => 12,
+            n => n,
+        };
+        format!("{}:{:02} {}", h12, mm, if hh < 12 { "AM" } else { "PM" })
+    };
+    let clock = format!(
+        "{} {} {}  {}",
+        DAYS[(wd % 7) as usize],
+        day,
+        MONTHS[((mo.max(1) - 1) % 12) as usize],
+        time
+    );
+    let mut x = w - 10.0;
+    let item_y = 4.0;
+    let item_h = BAR_H - 8.0;
+    let mut item = |width: f32| {
+        x -= width;
+        Rect::new(x, item_y, width, item_h)
+    };
+
+    let r = item(if clock24 { 128.0 } else { 148.0 });
+    draw_hover(g, th.hover, r, is_hot(BarAct::Clock));
+    match clock_style {
+        1 | 2 => {
+            // date on the left, an analog or binary clock on the right
+            let date = format!("{} {} {}", DAYS[(wd % 7) as usize], day, MONTHS[((mo.max(1) - 1) % 12) as usize]);
+            g.text(&date, Rect::new(r.x, r.y, r.w - 34.0, r.h), &f.small, th.t1, Align::Right);
+            let (cx, cy) = (r.x + r.w - 15.0, r.y + r.h / 2.0);
+            if clock_style == 1 {
+                g.fill_circle(cx, cy, 10.0, th.t1.fade(0.14));
+                g.fill_circle(cx, cy, 9.0, th.bg);
+                let a_h = ((hh % 12) as f32 + mm as f32 / 60.0) * std::f32::consts::TAU / 12.0;
+                let a_m = mm as f32 * std::f32::consts::TAU / 60.0;
+                g.line((cx, cy), (cx + a_h.sin() * 5.0, cy - a_h.cos() * 5.0), 1.8, th.t1);
+                g.line((cx, cy), (cx + a_m.sin() * 7.5, cy - a_m.cos() * 7.5), 1.2, accent);
+                g.fill_circle(cx, cy, 1.2, th.t1);
+            } else {
+                // binary-coded decimal: columns are tens/ones of hours and minutes
+                let digits = [hh / 10, hh % 10, mm / 10, mm % 10];
+                for (c, d) in digits.iter().enumerate() {
+                    for bit in 0..4u32 {
+                        let on = (d >> (3 - bit)) & 1 == 1;
+                        let col = if on { accent } else { th.t1.fade(0.16) };
+                        g.fill_circle(cx - 9.0 + c as f32 * 6.0, cy - 7.5 + bit as f32 * 5.0, 1.9, col);
+                    }
+                }
+            }
+        }
+        3 => {
+            // hours until Friday 00:00
+            let days = (5 + 7 - wd % 7) % 7;
+            let text = if wd % 7 == 5 {
+                "It's Friday!".to_string()
+            } else {
+                let left = days * 1440 - (hh * 60 + mm);
+                format!("{}d {}h to Friday", left / 1440, (left % 1440) / 60)
+            };
+            g.text(&text, r, &f.small, th.t1, Align::Center);
+        }
+        _ => g.text(&clock, r, &f.small, th.t1, Align::Center),
+    }
+    hits.push((r, BarAct::Clock));
+
+    if let Some((pct, charging)) = bar.battery {
+        let r = item(66.0);
+        draw_hover(g, th.hover, r, is_hot(BarAct::Battery));
+        let col = if charging {
+            Color(0.45, 0.85, 0.5, 1.0)
+        } else if pct <= 20 {
+            Color(1.0, 0.45, 0.4, 1.0)
+        } else {
+            th.t1
+        };
+        g.icon('\u{E83F}', Rect::new(r.x + 4.0, r.y, 20.0, r.h), &f.icon14, col);
+        g.text(
+            &format!("{}%", pct),
+            Rect::new(r.x + 24.0, r.y, 40.0, r.h),
+            &f.small,
+            th.t1,
+            Align::Left,
+        );
+        hits.push((r, BarAct::Battery));
+    }
+
+    if has_vol {
+        let r = item(30.0);
+        draw_hover(g, th.hover, r, is_hot(BarAct::Volume));
+        let glyph = if muted || vol <= 0.001 { '\u{E74F}' } else { '\u{E767}' };
+        g.icon(glyph, r, &f.icon14, th.t1);
+        hits.push((r, BarAct::Volume));
+    }
+
+    {
+        // always shown: the slider works even if Windows would not tell us the
+        // current level (we can still set it)
+        let r = item(30.0);
+        draw_hover(g, th.hover, r, is_hot(BarAct::Brightness));
+        g.icon('\u{E706}', r, &f.icon14, th.t1);
+        hits.push((r, BarAct::Brightness));
+    }
+
+    for (state, glyph, act) in [
+        (bt, '\u{E702}', BarAct::Bluetooth),
+        (wifi, '\u{E701}', BarAct::Wifi),
+    ] {
+        if state.is_none() {
+            continue;
+        }
+        let r = item(30.0);
+        draw_hover(g, th.hover, r, is_hot(act));
+        let mut col = if state == Some(true) { accent } else { th.t2 };
+        let busy = match act {
+            BarAct::Wifi => wifi_busy,
+            _ => bt_busy,
+        };
+        if busy {
+            col = Color(accent.0, accent.1, accent.2, pulse);
+        }
+        g.icon(glyph, r, &f.icon14, col);
+        hits.push((r, act));
+    }
+
+    if let Some((cpu, mem)) = stats {
+        // read-out only: not clickable, so it is not in `hits`
+        let r = item(118.0);
+        g.text(&format!("CPU {cpu}%  RAM {mem}%"), r, &f.small, th.t2, Align::Center);
+    }
+    bar.left_x = x;
+
+    let _ = g.end();
+    bar.hits = hits;
+    let _ = g.present(bar.hwnd, mon.left, mon.top, pw, ph);
 }
 
 fn draw_hover(g: &Gfx, c: Color, r: Rect, on: bool) {
